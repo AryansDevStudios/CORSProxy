@@ -1,17 +1,21 @@
 const express = require('express');
 const fetch = require('node-fetch');
 const cors = require('cors');
+const path = require('path');
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(cors());
+// Enable CORS
+app.use(cors({
+  exposedHeaders: ['Content-Disposition']
+}));
 
 // -----------------------------
 // HOME PAGE (Modern UI)
 // -----------------------------
 app.get('/', (req, res) => {
-  res.send(`
-<!DOCTYPE html>
+  res.send(`<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
@@ -114,25 +118,22 @@ copyOutputBtn.addEventListener('click', () => {
 });
 </script>
 </body>
-</html>
-  `);
+</html>`);
 });
 
 // -----------------------------
-// PROXY ENDPOINT
+// PROXY ENDPOINT (Improved)
 // -----------------------------
 app.get('/proxy', async (req, res) => {
   try {
     let fileUrl = req.query.url;
     const filenameParam = req.query.filename;
-
     if (!fileUrl) return res.status(400).send('Missing url parameter');
 
-    // Normalize Google Drive URLs
+    // Normalize Google Drive links
     const driveViewRegex = /https:\/\/drive\.google\.com\/file\/d\/([A-Za-z0-9_-]+)(?:\/view.*)?/;
     const driveOpenRegex = /https:\/\/drive\.google\.com\/open\?id=([A-Za-z0-9_-]+)/;
     const driveUcRegex = /https:\/\/drive\.google\.com\/uc\?id=([A-Za-z0-9_-]+)/;
-
     let match;
     if ((match = fileUrl.match(driveViewRegex))) {
       fileUrl = 'https://drive.google.com/uc?id=' + match[1];
@@ -142,24 +143,43 @@ app.get('/proxy', async (req, res) => {
       fileUrl = fileUrl;
     }
 
-    // Fetch file
-    const response = await fetch(fileUrl);
-    if (!response.ok) return res.status(500).send(`Failed to fetch: \${response.statusText}`);
+    // Fetch target file
+    const upstreamResponse = await fetch(fileUrl);
+    if (!upstreamResponse.ok) {
+      return res.status(502).send(`Failed to fetch: ${upstreamResponse.statusText}`);
+    }
 
-    const contentType = response.headers.get('content-type') || 'application/octet-stream';
-    const dispositionHeader = response.headers.get('content-disposition') || '';
-    const filename =
-      filenameParam ||
-      (dispositionHeader.match(/filename="?(.+?)"?$/)?.[1]) ||
-      'file';
+    // Extract headers
+    const contentType = upstreamResponse.headers.get('content-type') || 'application/octet-stream';
+    const disposition = upstreamResponse.headers.get('content-disposition') || '';
+
+    // Extract filename from Content-Disposition if available
+    const cdMatch = disposition.match(/filename\\*?=(?:UTF-8''|)["']?([^"';]+)["']?/i);
+    const headerFilename = cdMatch ? decodeURIComponent(cdMatch[1]) : null;
+
+    // Infer from URL
+    const urlFilename = (() => {
+      try {
+        const parsed = new URL(fileUrl);
+        const name = path.basename(parsed.pathname);
+        if (name && name !== '/') return name;
+      } catch {}
+      return null;
+    })();
+
+    // Final filename
+    const filename = filenameParam || headerFilename || urlFilename || 'file';
+    const safeName = encodeURIComponent(filename).replace(/['()]/g, escape);
 
     res.setHeader('Content-Type', contentType);
-    res.setHeader('Content-Disposition', `attachment; filename="\${filename}"`);
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"; filename*=UTF-8''${safeName}`);
 
-    const buffer = await response.arrayBuffer();
-    res.send(Buffer.from(buffer));
+    // Stream file to response
+    upstreamResponse.body.pipe(res);
+
   } catch (err) {
-    res.status(500).send(err.message);
+    console.error('Proxy error:', err);
+    res.status(500).send('Error: ' + err.message);
   }
 });
 
@@ -167,10 +187,10 @@ app.get('/proxy', async (req, res) => {
 // START SERVER + KEEP ALIVE
 // -----------------------------
 app.listen(PORT, () => {
-  const url = process.env.RENDER_EXTERNAL_URL || `http://localhost:\${PORT}`;
-  console.log(`✅ CORS-free proxy running at \${url}`);
+  const url = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
+  console.log(`✅ CORS-free proxy running at ${url}`);
 
-  // Keep Render instance awake
+  // Keep Render/other hosts awake
   if (url.startsWith('https://')) {
     setInterval(() => {
       fetch(url)
