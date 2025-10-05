@@ -1,171 +1,126 @@
 const express = require('express');
 const fetch = require('node-fetch');
 const cors = require('cors');
-
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 
-// Home page route
+// -----------------------------
+// HOME PAGE (Modern UI)
+// -----------------------------
 app.get('/', (req, res) => {
   res.send(`
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-      <meta charset="UTF-8">
-      <title>Universal CORS Proxy</title>
-      <style>
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap');
-        * { box-sizing: border-box; font-family: 'Inter', sans-serif; }
-        body { margin: 0; padding: 0; background: #f4f6f8; display: flex; justify-content: center; align-items: flex-start; min-height: 100vh; }
-        .container { background: #fff; margin-top: 50px; padding: 30px; border-radius: 12px; box-shadow: 0 8px 20px rgba(0,0,0,0.1); width: 450px; }
-        h1 { text-align: center; margin-bottom: 25px; color: #333; }
-        label { display: block; margin: 15px 0 5px; font-weight: 600; color: #555; }
-        input, textarea { width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 8px; font-size: 14px; }
-        textarea { resize: none; }
-        .btn { margin-top: 15px; padding: 12px; width: 100%; background: #007bff; color: #fff; border: none; border-radius: 8px; font-size: 16px; cursor: pointer; transition: 0.3s; }
-        .btn:hover { background: #0056b3; }
-        .row { display: flex; gap: 10px; margin-top: 5px; }
-        .row button { flex: 1; padding: 10px; font-size: 14px; border-radius: 8px; border: none; cursor: pointer; transition: 0.3s; }
-        .copy-btn { background: #28a745; color: #fff; }
-        .copy-btn:hover { background: #1e7e34; }
-        .paste-btn { background: #ffc107; color: #fff; }
-        .paste-btn:hover { background: #e0a800; }
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Universal CORS Proxy</title>
+  <style>
+    body { font-family: 'Inter', sans-serif; background: #0f172a; color: #e2e8f0; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+    h1 { font-size: 1.8rem; margin-bottom: 20px; color: #38bdf8; }
+    .card { background: #1e293b; padding: 30px; border-radius: 16px; box-shadow: 0 0 25px rgba(0,0,0,0.3); width: 90%; max-width: 550px; text-align: center; }
+    input, textarea { width: 100%; background: #334155; border: none; outline: none; color: #f8fafc; padding: 12px; margin: 8px 0; border-radius: 8px; resize: none; }
+    button { background: #38bdf8; color: #0f172a; font-weight: bold; border: none; padding: 10px 20px; border-radius: 8px; cursor: pointer; transition: 0.2s; margin: 6px; }
+    button:hover { background: #0ea5e9; }
+    .row { display: flex; gap: 8px; justify-content: center; }
+    #toast { visibility: hidden; min-width: 200px; background-color: #38bdf8; color: #0f172a; text-align: center; border-radius: 8px; padding: 12px; position: fixed; bottom: 30px; font-weight: 600; left: 50%; transform: translateX(-50%); z-index: 1; transition: all 0.4s; opacity: 0; }
+    #toast.show { visibility: visible; opacity: 1; bottom: 50px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>🌐 Universal CORS Proxy</h1>
+    <input type="text" id="input-url" placeholder="Enter file URL (Google Drive supported)" />
+    <div class="row">
+      <button id="paste-btn">📋 Paste</button>
+      <button id="copy-btn">📄 Copy Input</button>
+    </div>
+    <input type="text" id="filename" placeholder="Optional: Desired filename" />
+    <button id="convert-btn">⚡ Generate CORS-Free URL</button>
+    <textarea id="output-url" rows="3" readonly placeholder="Your CORS-Free URL will appear here..."></textarea>
+    <button id="copy-output">📎 Copy Output</button>
+  </div>
+  <div id="toast"></div>
 
-        /* Toast notifications */
-        .toast {
-          visibility: hidden;
-          min-width: 200px;
-          margin-left: -100px;
-          background-color: #333;
-          color: #fff;
-          text-align: center;
-          border-radius: 8px;
-          padding: 12px;
-          position: fixed;
-          z-index: 999;
-          left: 50%;
-          bottom: 30px;
-          font-size: 14px;
-          opacity: 0;
-          transition: opacity 0.5s, bottom 0.5s;
-        }
-        .toast.show {
-          visibility: visible;
-          opacity: 1;
-          bottom: 50px;
-        }
-      </style>
-    </head>
-    <body>
-      <div class="container">
-        <h1>Universal CORS Proxy</h1>
+<script>
+const input = document.getElementById('input-url');
+const filenameInput = document.getElementById('filename');
+const output = document.getElementById('output-url');
+const convertBtn = document.getElementById('convert-btn');
+const copyInputBtn = document.getElementById('copy-btn');
+const pasteBtn = document.getElementById('paste-btn');
+const copyOutputBtn = document.getElementById('copy-output');
+const toast = document.getElementById('toast');
 
-        <label for="input-url">Enter File URL:</label>
-        <input type="text" id="input-url" placeholder="Paste any file URL here">
+function showToast(message) {
+  toast.textContent = message;
+  toast.className = "show";
+  setTimeout(() => { toast.className = toast.className.replace("show", ""); }, 2000);
+}
 
-        <div class="row">
-          <button class="paste-btn" id="paste-btn">Paste from Clipboard</button>
-          <button class="copy-btn" id="copy-btn">Copy Input</button>
-        </div>
+// Detect & convert Google Drive links
+function convertDriveUrl(url) {
+  try {
+    const fileMatch = url.match(/https:\\/\\/drive\\.google\\.com\\/file\\/d\\/([A-Za-z0-9_-]+)/);
+    const openMatch = url.match(/https:\\/\\/drive\\.google\\.com\\/open\\?id=([A-Za-z0-9_-]+)/);
+    if (fileMatch) return 'https://drive.google.com/uc?id=' + fileMatch[1];
+    if (openMatch) return 'https://drive.google.com/uc?id=' + openMatch[1];
+  } catch (err) {}
+  return null;
+}
 
-        <label for="filename">Optional Filename:</label>
-        <input type="text" id="filename" placeholder="Leave blank to use original filename">
+// Generate CORS-free URL
+convertBtn.addEventListener('click', () => {
+  let url = input.value.trim();
+  if (!url) return showToast('Please enter a URL!');
 
-        <button class="btn" id="convert-btn">Generate CORS-Free URL</button>
+  const driveConverted = convertDriveUrl(url);
+  if (driveConverted) {
+    showToast('Detected Google Drive URL – converted automatically!');
+    url = driveConverted;
+  }
 
-        <label for="output-url">CORS-Free URL:</label>
-        <textarea id="output-url" readonly placeholder="Your CORS-free URL will appear here"></textarea>
+  const filename = filenameInput.value.trim();
+  let corsUrl = '/proxy?url=' + encodeURIComponent(url);
+  if (filename) corsUrl += '&filename=' + encodeURIComponent(filename);
 
-        <div class="row">
-          <button class="copy-btn" id="copy-output">Copy URL</button>
-        </div>
-      </div>
+  output.value = window.location.origin + corsUrl;
+  showToast('CORS-Free URL generated!');
+});
 
-      <!-- Toast notification -->
-      <div id="toast" class="toast"></div>
+// Copy input
+copyInputBtn.addEventListener('click', () => {
+  input.select(); document.execCommand('copy');
+  showToast('Input URL copied!');
+});
 
-      <script>
-        const input = document.getElementById('input-url');
-        const filenameInput = document.getElementById('filename');
-        const output = document.getElementById('output-url');
-        const convertBtn = document.getElementById('convert-btn');
-        const copyInputBtn = document.getElementById('copy-btn');
-        const pasteBtn = document.getElementById('paste-btn');
-        const copyOutputBtn = document.getElementById('copy-output');
-        const toast = document.getElementById('toast');
+// Paste clipboard
+pasteBtn.addEventListener('click', async () => {
+  try {
+    const text = await navigator.clipboard.readText();
+    input.value = text;
+    showToast('Pasted from clipboard!');
+  } catch {
+    showToast('Clipboard access denied');
+  }
+});
 
-        // Show toast messages
-        function showToast(message) {
-          toast.textContent = message;
-          toast.className = "toast show";
-          setTimeout(() => { toast.className = "toast"; }, 2000);
-        }
-
-        // Detect Google Drive file URLs and convert to UC link
-        function convertDriveUrl(url) {
-          try {
-            const driveRegex = /https:\\/\\/drive\\.google\\.com\\/(?:file\\/d\\/|open\\?id=)([A-Za-z0-9_-]{28,})/;
-            const match = url.match(driveRegex);
-            if (match && match[1]) {
-              const id = match[1];
-              return 'http://localhost:3000/proxy?url=' + encodeURIComponent('https://drive.google.com/uc?id=' + id);
-            }
-          } catch (err) {}
-          return null;
-        }
-
-        // Generate CORS-free URL
-        convertBtn.addEventListener('click', () => {
-          let url = input.value.trim();
-          if (!url) return showToast('Please enter a URL!');
-
-          const driveUrl = convertDriveUrl(url);
-          if (driveUrl) {
-            output.value = driveUrl;
-            showToast('Google Drive URL detected and converted!');
-            return;
-          }
-
-          const filename = filenameInput.value.trim();
-          let corsUrl = '/proxy?url=' + encodeURIComponent(url);
-          if (filename) corsUrl += '&filename=' + encodeURIComponent(filename);
-          output.value = window.location.origin + corsUrl;
-          showToast('CORS-free URL generated!');
-        });
-
-        // Copy input URL
-        copyInputBtn.addEventListener('click', () => {
-          input.select();
-          document.execCommand('copy');
-          showToast('Input URL copied!');
-        });
-
-        // Paste from clipboard
-        pasteBtn.addEventListener('click', async () => {
-          try {
-            const text = await navigator.clipboard.readText();
-            input.value = text;
-            showToast('Pasted from clipboard!');
-          } catch (err) {
-            showToast('Failed to read clipboard');
-          }
-        });
-
-        // Copy output URL
-        copyOutputBtn.addEventListener('click', () => {
-          output.select();
-          document.execCommand('copy');
-          showToast('CORS-free URL copied!');
-        });
-      </script>
-    </body>
-    </html>
+// Copy output
+copyOutputBtn.addEventListener('click', () => {
+  output.select(); document.execCommand('copy');
+  showToast('CORS-Free URL copied!');
+});
+</script>
+</body>
+</html>
   `);
 });
 
-// Universal proxy endpoint
+// -----------------------------
+// PROXY ENDPOINT
+// -----------------------------
 app.get('/proxy', async (req, res) => {
   try {
     let fileUrl = req.query.url;
@@ -174,31 +129,32 @@ app.get('/proxy', async (req, res) => {
     if (!fileUrl) return res.status(400).send('Missing url parameter');
 
     // Normalize Google Drive URLs
-    const driveViewRegex = /https:\/\/drive\.google\.com\/file\/d\/([A-Za-z0-9_-]{28,})(?:\/view.*)?/;
-    const driveOpenRegex = /https:\/\/drive\.google\.com\/open\?id=([A-Za-z0-9_-]{28,})/;
+    const driveViewRegex = /https:\/\/drive\.google\.com\/file\/d\/([A-Za-z0-9_-]+)(?:\/view.*)?/;
+    const driveOpenRegex = /https:\/\/drive\.google\.com\/open\?id=([A-Za-z0-9_-]+)/;
+    const driveUcRegex = /https:\/\/drive\.google\.com\/uc\?id=([A-Za-z0-9_-]+)/;
 
     let match;
     if ((match = fileUrl.match(driveViewRegex))) {
-      const id = match[1];
-      fileUrl = `https://drive.google.com/uc?id=${id}`;
+      fileUrl = 'https://drive.google.com/uc?id=' + match[1];
     } else if ((match = fileUrl.match(driveOpenRegex))) {
-      const id = match[1];
-      fileUrl = `https://drive.google.com/uc?id=${id}`;
+      fileUrl = 'https://drive.google.com/uc?id=' + match[1];
+    } else if ((match = fileUrl.match(driveUcRegex))) {
+      fileUrl = fileUrl;
     }
 
-    // Fetch the file
+    // Fetch file
     const response = await fetch(fileUrl);
-    if (!response.ok) return res.status(500).send(`Failed to fetch file: ${response.statusText}`);
+    if (!response.ok) return res.status(500).send(`Failed to fetch: \${response.statusText}`);
 
     const contentType = response.headers.get('content-type') || 'application/octet-stream';
     const dispositionHeader = response.headers.get('content-disposition') || '';
     const filename =
       filenameParam ||
-      dispositionHeader.match(/filename="?(.+?)"?$/)?.[1] ||
+      (dispositionHeader.match(/filename="?(.+?)"?$/)?.[1]) ||
       'file';
 
     res.setHeader('Content-Type', contentType);
-    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Content-Disposition', `attachment; filename="\${filename}"`);
 
     const buffer = await response.arrayBuffer();
     res.send(Buffer.from(buffer));
@@ -207,5 +163,19 @@ app.get('/proxy', async (req, res) => {
   }
 });
 
+// -----------------------------
+// START SERVER + KEEP ALIVE
+// -----------------------------
+app.listen(PORT, () => {
+  const url = process.env.RENDER_EXTERNAL_URL || `http://localhost:\${PORT}`;
+  console.log(`✅ CORS-free proxy running at \${url}`);
 
-app.listen(PORT, () => console.log(`CORS-free proxy running at http://localhost:${PORT}`));
+  // Keep Render instance awake
+  if (url.startsWith('https://')) {
+    setInterval(() => {
+      fetch(url)
+        .then(() => console.log('🔄 Keep-alive ping sent'))
+        .catch(() => console.log('⚠️ Keep-alive ping failed'));
+    }, 10 * 1000);
+  }
+});
