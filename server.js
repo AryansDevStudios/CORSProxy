@@ -8,7 +8,7 @@ const { PassThrough } = require('stream');
 const mime = require('mime-types');
 
 const app = express();
-const PORT = process.env.PORT || 3005;
+const PORT = process.env.PORT || 3000;
 
 const CACHE_DIR = path.join(__dirname, 'cache');
 const CACHE_DURATION_SECONDS = 24 * 60 * 60;
