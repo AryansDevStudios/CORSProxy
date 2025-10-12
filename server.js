@@ -4,118 +4,79 @@ const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
-const { PassThrough } = require('stream'); // Import PassThrough for correct stream piping
+const { PassThrough } = require('stream');
+const mime = require('mime-types');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3005;
 
-// --- Caching Configuration ---
 const CACHE_DIR = path.join(__dirname, 'cache');
-const CACHE_DURATION_SECONDS = 24 * 60 * 60; // 1 day
-
-// Ensure cache directory exists
-if (!fs.existsSync(CACHE_DIR)) {
-  fs.mkdirSync(CACHE_DIR, { recursive: true });
-  console.log(`Cache directory created at ${CACHE_DIR}`);
-}
-
-// --- Automatic Cache Cleanup ---
-const CLEANUP_INTERVAL_MINUTES = 60; // Check for old files every hour
+const CACHE_DURATION_SECONDS = 24 * 60 * 60;
+const CLEANUP_INTERVAL_MINUTES = 60;
 const MAX_CACHE_AGE_SECONDS = 2 * 24 * 60 * 60;
 
-function cleanupCache() {
-  console.log('[CACHE_CLEANUP] Running cleanup...');
-  fs.readdir(CACHE_DIR, (err, files) => {
-    if (err) {
-      console.error('[CACHE_CLEANUP] Error reading cache directory:', err);
-      return;
-    }
-    if (files.length === 0) {
-      console.log('[CACHE_CLEANUP] Cache is empty, nothing to do.');
-      return;
-    }
-    let deletedCount = 0;
-    let checkedCount = 0;
-    const totalFiles = files.filter(f => !f.endsWith('.json')).length;
-    if (totalFiles === 0) {
-        console.log('[CACHE_CLEANUP] Finished. No cache files found to check.');
-        return;
-    }
-    
-    files.forEach(file => {
-      // Only process cache files, not metadata
-      if(file.endsWith('.json')) return;
+if (!fs.existsSync(CACHE_DIR)) {
+  fs.mkdirSync(CACHE_DIR, { recursive: true });
+}
 
+function cleanupCache() {
+  fs.readdir(CACHE_DIR, (err, files) => {
+    if (err) return;
+    files.forEach(file => {
+      if (file.endsWith('.json')) return;
       const filePath = path.join(CACHE_DIR, file);
       fs.stat(filePath, (err, stats) => {
-        checkedCount++;
         if (err) return;
         const ageInSeconds = (Date.now() - stats.mtime.getTime()) / 1000;
         if (ageInSeconds > MAX_CACHE_AGE_SECONDS) {
-          fs.unlink(filePath, err => {
-            if (!err) {
-              deletedCount++;
-              console.log(`[CACHE_CLEANUP] Deleted old file: ${file}`);
-              // Also delete metadata file
-              fs.unlink(filePath + '.meta.json', () => {});
-            }
-          });
-        }
-        if (checkedCount === totalFiles) {
-             if (deletedCount > 0) {
-                console.log(`[CACHE_CLEANUP] Finished. Deleted ${deletedCount} files.`);
-            } else {
-                console.log('[CACHE_CLEANUP] Finished. No old files found to delete.');
-            }
+          fs.unlink(filePath, () => {});
+          fs.unlink(filePath + '.meta.json', () => {});
         }
       });
     });
   });
 }
+
 setInterval(cleanupCache, CLEANUP_INTERVAL_MINUTES * 60 * 1000);
 cleanupCache();
 
-// Enable CORS
 app.use(cors({
   exposedHeaders: ['Content-Disposition', 'X-Cache-Status']
 }));
 
-// -----------------------------
-// HOME PAGE (Modern UI)
-// -----------------------------
 app.get('/', (req, res) => {
   res.send(`<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Universal CORS Proxy</title>
-  <style>
-    body { font-family: 'Inter', sans-serif; background: #0f172a; color: #e2e8f0; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; }
-    h1 { font-size: 1.8rem; margin-bottom: 20px; color: #38bdf8; }
-    .card { background: #1e293b; padding: 30px; border-radius: 16px; box-shadow: 0 0 25px rgba(0,0,0,0.3); width: 90%; max-width: 550px; text-align: center; }
-    input, textarea { width: 100%; background: #334155; border: none; outline: none; color: #f8fafc; padding: 12px; margin: 8px 0; border-radius: 8px; resize: none; }
-    button { background: #38bdf8; color: #0f172a; font-weight: bold; border: none; padding: 10px 20px; border-radius: 8px; cursor: pointer; transition: 0.2s; margin: 6px; }
-    button:hover { background: #0ea5e9; }
-    .row { display: flex; gap: 8px; justify-content: center; }
-    #toast { visibility: hidden; min-width: 200px; background-color: #38bdf8; color: #0f172a; text-align: center; border-radius: 8px; padding: 12px; position: fixed; bottom: 30px; font-weight: 600; left: 50%; transform: translateX(-50%); z-index: 1; transition: all 0.4s; opacity: 0; }
-    #toast.show { visibility: visible; opacity: 1; bottom: 50px; }
-  </style>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Universal CORS Proxy</title>
+<style>
+body { font-family: 'Inter', sans-serif; background: #0f172a; color: #e2e8f0; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+h1 { font-size: 1.8rem; margin-bottom: 20px; color: #38bdf8; }
+.card { background: #1e293b; padding: 30px; border-radius: 16px; box-shadow: 0 0 25px rgba(0,0,0,0.3); width: 90%; max-width: 550px; text-align: center; }
+input, textarea { width: 100%; background: #334155; border: none; outline: none; color: #f8fafc; padding: 12px; margin: 8px 0; border-radius: 8px; resize: none; }
+button { background: #38bdf8; color: #0f172a; font-weight: bold; border: none; padding: 10px 20px; border-radius: 8px; cursor: pointer; transition: 0.2s; margin: 6px; }
+button:hover { background: #0ea5e9; }
+.row { display: flex; gap: 8px; justify-content: center; }
+#toast { visibility: hidden; min-width: 200px; background-color: #38bdf8; color: #0f172a; text-align: center; border-radius: 8px; padding: 12px; position: fixed; bottom: 30px; font-weight: 600; left: 50%; transform: translateX(-50%); z-index: 1; transition: all 0.4s; opacity: 0; }
+#toast.show { visibility: visible; opacity: 1; bottom: 50px; }
+</style>
 </head>
 <body>
-  <div class="card">
-    <h1>🌐 Universal CORS Proxy</h1>
-    <input type="text" id="input-url" placeholder="Enter file URL (Google Drive supported)" />
-    <div class="row">
-      <button id="paste-btn">📋 Paste</button>
-      <button id="copy-btn">📄 Copy Input</button>
-    </div>
-    <input type="text" id="filename" placeholder="Optional: Desired filename" />
-    <button id="convert-btn">⚡ Generate CORS-Free URL</button>
-    <textarea id="output-url" rows="3" readonly placeholder="Your CORS-Free URL will appear here..."></textarea>
-    <button id="copy-output">📎 Copy Output</button>
-  </div>
-  <div id="toast"></div>
+<div class="card">
+<h1>🌐 Universal CORS Proxy</h1>
+<input type="text" id="input-url" placeholder="Enter file URL (Google Drive supported)" />
+<div class="row">
+  <button id="paste-btn">📋 Paste</button>
+  <button id="copy-btn">📄 Copy Input</button>
+</div>
+<input type="text" id="filename" placeholder="Optional: Desired filename" />
+<button id="convert-btn">⚡ Generate CORS-Free URL</button>
+<textarea id="output-url" rows="3" readonly placeholder="Your CORS-Free URL will appear here..."></textarea>
+<button id="copy-output">📎 Copy Output</button>
+</div>
+<div id="toast"></div>
 
 <script>
 const input = document.getElementById('input-url');
@@ -127,38 +88,31 @@ const pasteBtn = document.getElementById('paste-btn');
 const copyOutputBtn = document.getElementById('copy-output');
 const toast = document.getElementById('toast');
 const BASE_PROXY = window.location.origin;
+
 function showToast(message) {
   toast.textContent = message;
   toast.className = "show";
   setTimeout(() => { toast.className = toast.className.replace("show", ""); }, 2000);
 }
-function convertDriveUrl(url) {
-  try {
-    const fileMatch = url.match(/https:\\/\\/drive\\.google\\.com\\/file\\/d\\/([A-Za-z0-9_-]+)/);
-    const openMatch = url.match(/https:\\/\\/drive\\.google\\.com\\/open\\?id=([A-Za-z0-9_-]+)/);
-    if (fileMatch) return 'https://drive.google.com/uc?id=' + fileMatch[1];
-    if (openMatch) return 'https://drive.google.com/uc?id=' + openMatch[1];
-  } catch (err) {}
-  return null;
-}
+
 convertBtn.addEventListener('click', () => {
-  let url = input.value.trim();
+  const url = input.value.trim();
   if (!url) return showToast('Please enter a URL!');
-  // The backend now handles this automatically, but doing it on the frontend provides instant user feedback.
-  const driveConverted = convertDriveUrl(url);
-  if (driveConverted) {
-    showToast('Detected Google Drive URL – proxy will handle it!');
-  }
+
   const filename = filenameInput.value.trim();
-  let corsUrl = BASE_PROXY + '/proxy?url=' + encodeURIComponent(input.value.trim()); // Use original URL
+  // Build the proxy URL on the client side. Use window.location.origin to match BASE_PROXY
+  let corsUrl = window.location.origin + '/proxy?url=' + encodeURIComponent(url);
   if (filename) corsUrl += '&filename=' + encodeURIComponent(filename);
+
   output.value = corsUrl;
   showToast('CORS-Free URL generated!');
 });
+
 copyInputBtn.addEventListener('click', () => {
   input.select(); document.execCommand('copy');
   showToast('Input URL copied!');
 });
+
 pasteBtn.addEventListener('click', async () => {
   try {
     const text = await navigator.clipboard.readText();
@@ -168,143 +122,112 @@ pasteBtn.addEventListener('click', async () => {
     showToast('Clipboard access denied');
   }
 });
+
 copyOutputBtn.addEventListener('click', () => {
   output.select(); document.execCommand('copy');
   showToast('CORS-Free URL copied!');
 });
 </script>
 </body>
-</html>`);
+</html>
+`);
 });
 
-// ----------------------------------------------------
-// PROXY ENDPOINT WITH CACHING & GOOGLE DRIVE HANDLING
-// ----------------------------------------------------
 app.get('/proxy', async (req, res) => {
   try {
     const originalUrl = req.query.url;
     const filenameParam = req.query.filename;
     if (!originalUrl) return res.status(400).send('Missing url parameter');
 
-    // Always use the original URL for a consistent cache key
-    const cacheKeySource = `${originalUrl}|${filenameParam || ''}`;
-    const cacheKey = crypto.createHash('md5').update(cacheKeySource).digest('hex');
+    const cacheKey = crypto.createHash('md5').update(`${originalUrl}|${filenameParam || ''}`).digest('hex');
     const cacheFilePath = path.join(CACHE_DIR, cacheKey);
     const metadataPath = cacheFilePath + '.meta.json';
 
     res.setHeader('Cache-Control', `public, max-age=${CACHE_DURATION_SECONDS}, immutable`);
 
-    // --- CACHE HIT ---
+    // Serve from cache if available
     if (fs.existsSync(cacheFilePath) && fs.existsSync(metadataPath)) {
       const stats = fs.statSync(cacheFilePath);
-      const ageInSeconds = (Date.now() - stats.mtime.getTime()) / 1000;
-      if (ageInSeconds < CACHE_DURATION_SECONDS) {
-        console.log(`[CACHE HIT] Serving ${originalUrl}`);
-        const metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
-        res.setHeader('X-Cache-Status', 'HIT');
-        res.setHeader('Content-Type', metadata.contentType);
-        res.setHeader('Content-Disposition', metadata.contentDisposition);
-        fs.createReadStream(cacheFilePath).pipe(res);
-        return;
-      }
+      const metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
+      res.setHeader('X-Cache-Status', 'HIT');
+      res.setHeader('Content-Type', metadata.contentType);
+      res.setHeader('Content-Disposition', metadata.contentDisposition);
+      fs.createReadStream(cacheFilePath).pipe(res);
+      return;
     }
 
-    // --- CACHE MISS ---
-    console.log(`[CACHE MISS] Processing ${originalUrl}`);
     res.setHeader('X-Cache-Status', 'MISS');
 
+    // --- Fetch upstream ---
     let upstreamResponse;
     let targetUrl = originalUrl;
 
-    // --- Google Drive URL Transformation ---
-    const driveRegex = /https:\/\/drive\.google\.com\/(?:file\/d\/|open\?id=)([a-zA-Z0-9_-]+)/;
-    const driveMatch = targetUrl.match(driveRegex);
-
+    const driveMatch = targetUrl.match(/https:\/\/drive\.google\.com\/(?:file\/d\/|open\?id=)([a-zA-Z0-9_-]+)/);
     if (driveMatch) {
       const fileId = driveMatch[1];
-      const initialDriveUrl = `https://drive.google.com/uc?export=download&id=${fileId}`;
-      console.log(`[GDRIVE] Detected Google Drive URL. Attempting fetch from: ${initialDriveUrl}`);
-
-      const firstResponse = await fetch(initialDriveUrl, { redirect: 'follow' });
-      
-      // Check if it's the confirmation page (for large files)
+      const firstResponse = await fetch(`https://drive.google.com/uc?export=download&id=${fileId}`, { redirect: 'follow' });
       const contentTypeHeader = firstResponse.headers.get('content-type') || '';
+
       if (contentTypeHeader.includes('text/html')) {
-        console.log('[GDRIVE] Confirmation page detected. Attempting second fetch.');
         const body = await firstResponse.text();
         const cookies = firstResponse.headers.get('set-cookie');
-        
-        const confirmLinkRegex = /<form id="download-form" action="([^"]+)"/;
-        const confirmMatch = body.match(confirmLinkRegex);
-
+        const confirmMatch = body.match(/<form id="download-form" action="([^"]+)"/);
         if (confirmMatch && confirmMatch[1] && cookies) {
-          const confirmUrl = confirmMatch[1].replace(/&amp;/g, '&');
-          const finalUrl = `https://drive.google.com${confirmUrl}`;
-          console.log(`[GDRIVE] Found confirmation link. Fetching: ${finalUrl}`);
-          
+          const finalUrl = `https://drive.google.com${confirmMatch[1].replace(/&amp;/g, '&')}`;
           upstreamResponse = await fetch(finalUrl, { headers: { 'Cookie': cookies } });
-        } else {
-          return res.status(404).send('Google Drive file not found or confirmation failed.');
-        }
+        } else return res.status(404).send('Google Drive file not found or confirmation failed.');
       } else {
-        // It was a small file, direct download worked
         upstreamResponse = firstResponse;
       }
     } else {
-      // Not a Google Drive URL, fetch directly
       upstreamResponse = await fetch(targetUrl);
     }
 
-    if (!upstreamResponse.ok) {
-      return res.status(upstreamResponse.status).send(`Failed to fetch: ${upstreamResponse.statusText}`);
-    }
+    if (!upstreamResponse.ok) return res.status(upstreamResponse.status).send(`Failed to fetch: ${upstreamResponse.statusText}`);
 
-    // --- Process Response and Set Headers ---
     const contentType = upstreamResponse.headers.get('content-type') || 'application/octet-stream';
-    
-    // Safety check: Don't serve and cache HTML error pages from the upstream source
-    if (contentType.includes('text/html')) {
-      console.error(`[ERROR] Upstream source returned an HTML page. Aborting. URL: ${targetUrl}`);
-      return res.status(502).send('Upstream source returned an HTML page instead of a file, which may be an error or login page.');
-    }
 
+    // -----------------------
+    // OLD LOGIC FOR FILENAME
+    // -----------------------
     const disposition = upstreamResponse.headers.get('content-disposition') || '';
     const cdMatch = disposition.match(/filename\*?=(?:UTF-8'')?([^;]+)/i);
     let headerFilename = null;
     if (cdMatch && cdMatch[1]) {
-        try {
-            headerFilename = decodeURIComponent(cdMatch[1].replace(/["']/g, ''));
-        } catch (e) {
-            headerFilename = cdMatch[1].replace(/["']/g, '');
-        }
+        try { headerFilename = decodeURIComponent(cdMatch[1].replace(/["']/g, '')); }
+        catch (e) { headerFilename = cdMatch[1].replace(/["']/g, ''); }
     }
 
     const urlFilename = path.basename(new URL(originalUrl).pathname);
-    const filename = filenameParam || headerFilename || (urlFilename !== '/' && urlFilename !== '' ? urlFilename : 'downloaded-file');
+    let filename = filenameParam || headerFilename || (urlFilename !== '/' && urlFilename !== '' ? urlFilename : 'downloaded-file');
 
-    const safeName = encodeURIComponent(filename).replace(/'/g, '%27'); // More robust encoding for filenames
+    // Ensure correct extension using mime-types
+    const mime = require('mime-types');
+    const ext = mime.extension(contentType);
+    if (ext && !filename.includes('.')) filename += '.' + ext;
+
+    const safeName = encodeURIComponent(filename).replace(/'/g, '%27');
     const finalDisposition = `attachment; filename="${filename.replace(/"/g, '\\"')}"; filename*=UTF-8''${safeName}`;
-    
+
     res.setHeader('Content-Type', contentType);
     res.setHeader('Content-Disposition', finalDisposition);
-    
-    // --- Stream to Client and Cache Simultaneously ---
-    // This is the correct way to handle piping a stream to multiple destinations.
+
+    // --- Stream to client & cache ---
+    const { PassThrough } = require('stream');
     const passthrough = new PassThrough();
-    upstreamResponse.body.pipe(passthrough); // Data from fetch goes into passthrough
-    
+    upstreamResponse.body.pipe(passthrough);
+
     const fileStream = fs.createWriteStream(cacheFilePath);
-    passthrough.pipe(fileStream); // Data from passthrough goes to the cache file
-    passthrough.pipe(res);       // Data from passthrough also goes to the client
+    passthrough.pipe(fileStream);
+    passthrough.pipe(res);
 
     fileStream.on('finish', () => {
       const metadata = { contentType, contentDisposition: finalDisposition };
       fs.writeFileSync(metadataPath, JSON.stringify(metadata), 'utf8');
       console.log(`[CACHE SET] Cached response for ${originalUrl}`);
     });
-    fileStream.on('error', (err) => {
-        console.error('[CACHE ERROR] Could not write to cache file:', err);
-    });
+
+    fileStream.on('error', (err) => console.error('[CACHE ERROR] Could not write to cache:', err));
 
   } catch (err) {
     console.error('Proxy error:', err.message);
@@ -313,30 +236,16 @@ app.get('/proxy', async (req, res) => {
 });
 
 
-// -----------------------------
-// START SERVER + KEEP ALIVE
-// -----------------------------
 app.listen(PORT, () => {
-  const localUrl = `http://localhost:${PORT}`;
-  // You might want to make this dynamic if deploying elsewhere
-  const publicUrl = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
-
-  console.log(`✅ Server listening on ${localUrl}`);
-  
-  // Only run keep-alive if on a platform that provides a public URL (like Render)
-  if (process.env.RENDER_EXTERNAL_URL) {
-      console.log(`✅ Public URL for keep-alive: ${publicUrl}`);
-      setInterval(() => {
-        console.log(`Pinging ${publicUrl} to keep alive...`);
-        fetch(publicUrl)
-          .then(res => {
-            if (res.ok) {
-              console.log('🔄 Keep-alive ping successful.');
-            } else {
-              console.log(`⚠️ Keep-alive ping failed with status: ${res.status}`);
-            }
-          })
-          .catch(err => console.log(`⚠️ Keep-alive ping failed: ${err.message}`));
-      }, 10 * 1000);
-  }
+  console.log(`✅ Google Drive Proxy running on http://localhost:${PORT}`);
 });
+
+const KEEP_ALIVE_URL = 'https://corsproxy-bppd.onrender.com/';
+setInterval(async () => {
+  try {
+    const res = await fetch(KEEP_ALIVE_URL);
+    console.log(`Keep-alive ping: ${res.status} at ${new Date().toLocaleTimeString()}`);
+  } catch (err) {
+    console.warn('Keep-alive error:', err.message);
+  }
+}, 10 * 1000);
