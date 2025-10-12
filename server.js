@@ -2,13 +2,66 @@ const express = require('express');
 const fetch = require('node-fetch');
 const cors = require('cors');
 const path = require('path');
+const fs = require('fs');
+const crypto = require('crypto');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// --- Caching Configuration ---
+const CACHE_DIR = path.join(__dirname, 'cache');
+const CACHE_DURATION_SECONDS = 24 * 60 * 60; // 1 day
+
+// Ensure cache directory exists
+if (!fs.existsSync(CACHE_DIR)) {
+  fs.mkdirSync(CACHE_DIR, { recursive: true });
+  console.log(`Cache directory created at ${CACHE_DIR}`);
+}
+
+// --- Automatic Cache Cleanup ---
+const CLEANUP_INTERVAL_MINUTES = 60; // Check for old files every hour
+const MAX_CACHE_AGE_SECONDS = 2 * 24 * 60 * 60; // Delete files older than 2 days
+
+function cleanupCache() {
+  console.log('[CACHE_CLEANUP] Running cleanup...');
+  fs.readdir(CACHE_DIR, (err, files) => {
+    if (err) {
+      console.error('[CACHE_CLEANUP] Error reading cache directory:', err);
+      return;
+    }
+    if (files.length === 0) {
+      console.log('[CACHE_CLEANUP] Cache is empty, nothing to do.');
+      return;
+    }
+    let deletedCount = 0;
+    files.forEach(file => {
+      const filePath = path.join(CACHE_DIR, file);
+      fs.stat(filePath, (err, stats) => {
+        if (err) return;
+        const ageInSeconds = (Date.now() - stats.mtime.getTime()) / 1000;
+        if (ageInSeconds > MAX_CACHE_AGE_SECONDS) {
+          fs.unlink(filePath, err => {
+            if (!err) {
+              deletedCount++;
+              console.log(`[CACHE_CLEANUP] Deleted old file: ${file}`);
+            }
+          });
+        }
+      });
+    });
+    if (deletedCount > 0) {
+        console.log(`[CACHE_CLEANUP] Finished. Deleted ${deletedCount} files.`);
+    } else {
+        console.log('[CACHE_CLEANUP] Finished. No old files found to delete.');
+    }
+  });
+}
+setInterval(cleanupCache, CLEANUP_INTERVAL_MINUTES * 60 * 1000);
+cleanupCache();
+
 // Enable CORS
 app.use(cors({
-  exposedHeaders: ['Content-Disposition']
+  exposedHeaders: ['Content-Disposition', 'X-Cache-Status']
 }));
 
 // -----------------------------
@@ -57,14 +110,12 @@ const copyInputBtn = document.getElementById('copy-btn');
 const pasteBtn = document.getElementById('paste-btn');
 const copyOutputBtn = document.getElementById('copy-output');
 const toast = document.getElementById('toast');
-
+const BASE_PROXY = window.location.origin;
 function showToast(message) {
   toast.textContent = message;
   toast.className = "show";
   setTimeout(() => { toast.className = toast.className.replace("show", ""); }, 2000);
 }
-
-// Detect & convert Google Drive links
 function convertDriveUrl(url) {
   try {
     const fileMatch = url.match(/https:\\/\\/drive\\.google\\.com\\/file\\/d\\/([A-Za-z0-9_-]+)/);
@@ -74,33 +125,24 @@ function convertDriveUrl(url) {
   } catch (err) {}
   return null;
 }
-
-// Generate CORS-free URL
 convertBtn.addEventListener('click', () => {
   let url = input.value.trim();
   if (!url) return showToast('Please enter a URL!');
-
   const driveConverted = convertDriveUrl(url);
   if (driveConverted) {
     showToast('Detected Google Drive URL – converted automatically!');
     url = driveConverted;
   }
-
   const filename = filenameInput.value.trim();
-  let corsUrl = '/proxy?url=' + encodeURIComponent(url);
+  let corsUrl = BASE_PROXY + '/proxy?url=' + encodeURIComponent(url);
   if (filename) corsUrl += '&filename=' + encodeURIComponent(filename);
-
-  output.value = window.location.origin + corsUrl;
+  output.value = corsUrl;
   showToast('CORS-Free URL generated!');
 });
-
-// Copy input
 copyInputBtn.addEventListener('click', () => {
   input.select(); document.execCommand('copy');
   showToast('Input URL copied!');
 });
-
-// Paste clipboard
 pasteBtn.addEventListener('click', async () => {
   try {
     const text = await navigator.clipboard.readText();
@@ -110,8 +152,6 @@ pasteBtn.addEventListener('click', async () => {
     showToast('Clipboard access denied');
   }
 });
-
-// Copy output
 copyOutputBtn.addEventListener('click', () => {
   output.select(); document.execCommand('copy');
   showToast('CORS-Free URL copied!');
@@ -122,59 +162,57 @@ copyOutputBtn.addEventListener('click', () => {
 });
 
 // -----------------------------
-// PROXY ENDPOINT (Improved)
+// PROXY ENDPOINT WITH CACHING
 // -----------------------------
 app.get('/proxy', async (req, res) => {
   try {
-    let fileUrl = req.query.url;
+    const fileUrl = req.query.url;
     const filenameParam = req.query.filename;
     if (!fileUrl) return res.status(400).send('Missing url parameter');
 
-    // Normalize Google Drive links
-    const driveViewRegex = /https:\/\/drive\.google\.com\/file\/d\/([A-Za-z0-9_-]+)(?:\/view.*)?/;
-    const driveOpenRegex = /https:\/\/drive\.google\.com\/open\?id=([A-Za-z0-9_-]+)/;
-    const driveUcRegex = /https:\/\/drive\.google\.com\/uc\?id=([A-Za-z0-9_-]+)/;
-    let match;
-    if ((match = fileUrl.match(driveViewRegex))) {
-      fileUrl = 'https://drive.google.com/uc?id=' + match[1];
-    } else if ((match = fileUrl.match(driveOpenRegex))) {
-      fileUrl = 'https://drive.google.com/uc?id=' + match[1];
-    } else if ((match = fileUrl.match(driveUcRegex))) {
-      fileUrl = fileUrl;
+    const cacheKeySource = `${fileUrl}|${filenameParam || ''}`;
+    const cacheKey = crypto.createHash('md5').update(cacheKeySource).digest('hex');
+    const cacheFilePath = path.join(CACHE_DIR, cacheKey);
+    const metadataPath = cacheFilePath + '.meta.json';
+
+    res.setHeader('Cache-Control', `public, max-age=${CACHE_DURATION_SECONDS}, immutable`);
+
+    if (fs.existsSync(cacheFilePath) && fs.existsSync(metadataPath)) {
+      const stats = fs.statSync(cacheFilePath);
+      const ageInSeconds = (Date.now() - stats.mtime.getTime()) / 1000;
+      if (ageInSeconds < CACHE_DURATION_SECONDS) {
+        console.log(`[CACHE HIT] Serving ${fileUrl}`);
+        const metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
+        res.setHeader('X-Cache-Status', 'HIT');
+        res.setHeader('Content-Type', metadata.contentType);
+        res.setHeader('Content-Disposition', metadata.contentDisposition);
+        fs.createReadStream(cacheFilePath).pipe(res);
+        return;
+      }
     }
 
-    // Fetch target file
+    console.log(`[CACHE MISS] Fetching ${fileUrl}`);
+    res.setHeader('X-Cache-Status', 'MISS');
     const upstreamResponse = await fetch(fileUrl);
     if (!upstreamResponse.ok) {
       return res.status(502).send(`Failed to fetch: ${upstreamResponse.statusText}`);
     }
 
-    // Extract headers
     const contentType = upstreamResponse.headers.get('content-type') || 'application/octet-stream';
     const disposition = upstreamResponse.headers.get('content-disposition') || '';
-
-    // Extract filename from Content-Disposition if available
     const cdMatch = disposition.match(/filename\\*?=(?:UTF-8''|)["']?([^"';]+)["']?/i);
     const headerFilename = cdMatch ? decodeURIComponent(cdMatch[1]) : null;
-
-    // Infer from URL
-    const urlFilename = (() => {
-      try {
-        const parsed = new URL(fileUrl);
-        const name = path.basename(parsed.pathname);
-        if (name && name !== '/') return name;
-      } catch {}
-      return null;
-    })();
-
-    // Final filename
-    const filename = filenameParam || headerFilename || urlFilename || 'file';
+    const urlFilename = path.basename(new URL(fileUrl).pathname);
+    const filename = filenameParam || headerFilename || (urlFilename !== '/' ? urlFilename : 'file');
     const safeName = encodeURIComponent(filename).replace(/['()]/g, escape);
-
+    const finalDisposition = `attachment; filename="${filename}"; filename*=UTF-8''${safeName}`;
     res.setHeader('Content-Type', contentType);
-    res.setHeader('Content-Disposition', `attachment; filename="${filename}"; filename*=UTF-8''${safeName}`);
-
-    // Stream file to response
+    res.setHeader('Content-Disposition', finalDisposition);
+    
+    const fileStream = fs.createWriteStream(cacheFilePath);
+    upstreamResponse.body.pipe(fileStream);
+    const metadata = { contentType, contentDisposition: finalDisposition };
+    fs.writeFileSync(metadataPath, JSON.stringify(metadata));
     upstreamResponse.body.pipe(res);
 
   } catch (err) {
@@ -187,15 +225,23 @@ app.get('/proxy', async (req, res) => {
 // START SERVER + KEEP ALIVE
 // -----------------------------
 app.listen(PORT, () => {
-  const url = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
-  console.log(`✅ CORS-free proxy running at ${url}`);
+  const localUrl = `http://localhost:${PORT}`;
+  const publicUrl = 'https://corsproxy-bppd.onrender.com'; // Hardcoded public URL
 
-  // Keep Render/other hosts awake
-  if (url.startsWith('https://')) {
-    setInterval(() => {
-      fetch(url)
-        .then(() => console.log('🔄 Keep-alive ping sent'))
-        .catch(() => console.log('⚠️ Keep-alive ping failed'));
-    }, 10 * 1000);
-  }
+  console.log(`✅ Server listening on ${localUrl}`);
+  console.log(`✅ Public URL for keep-alive: ${publicUrl}`);
+
+  // Keep Render's free tier awake by pinging the public URL
+  setInterval(() => {
+    console.log(`Pinging ${publicUrl} to keep alive...`);
+    fetch(publicUrl)
+      .then(res => {
+        if (res.ok) {
+          console.log('🔄 Keep-alive ping successful.');
+        } else {
+          console.log(`⚠️ Keep-alive ping failed with status: ${res.status}`);
+        }
+      })
+      .catch(err => console.log(`⚠️ Keep-alive ping failed: ${err.message}`));
+  }, 10 * 1000);
 });
