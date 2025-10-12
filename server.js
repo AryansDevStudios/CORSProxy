@@ -4,6 +4,7 @@ const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
+const { PassThrough } = require('stream'); // Import PassThrough for correct stream piping
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -20,7 +21,7 @@ if (!fs.existsSync(CACHE_DIR)) {
 
 // --- Automatic Cache Cleanup ---
 const CLEANUP_INTERVAL_MINUTES = 60; // Check for old files every hour
-const MAX_CACHE_AGE_SECONDS = 2 * 24 * 60 * 60; // Delete files older than 2 days
+const MAX_CACHE_AGE_SECONDS = 2 * 24 * 60 * 60;
 
 function cleanupCache() {
   console.log('[CACHE_CLEANUP] Running cleanup...');
@@ -34,9 +35,20 @@ function cleanupCache() {
       return;
     }
     let deletedCount = 0;
+    let checkedCount = 0;
+    const totalFiles = files.filter(f => !f.endsWith('.json')).length;
+    if (totalFiles === 0) {
+        console.log('[CACHE_CLEANUP] Finished. No cache files found to check.');
+        return;
+    }
+    
     files.forEach(file => {
+      // Only process cache files, not metadata
+      if(file.endsWith('.json')) return;
+
       const filePath = path.join(CACHE_DIR, file);
       fs.stat(filePath, (err, stats) => {
+        checkedCount++;
         if (err) return;
         const ageInSeconds = (Date.now() - stats.mtime.getTime()) / 1000;
         if (ageInSeconds > MAX_CACHE_AGE_SECONDS) {
@@ -44,16 +56,20 @@ function cleanupCache() {
             if (!err) {
               deletedCount++;
               console.log(`[CACHE_CLEANUP] Deleted old file: ${file}`);
+              // Also delete metadata file
+              fs.unlink(filePath + '.meta.json', () => {});
             }
           });
         }
+        if (checkedCount === totalFiles) {
+             if (deletedCount > 0) {
+                console.log(`[CACHE_CLEANUP] Finished. Deleted ${deletedCount} files.`);
+            } else {
+                console.log('[CACHE_CLEANUP] Finished. No old files found to delete.');
+            }
+        }
       });
     });
-    if (deletedCount > 0) {
-        console.log(`[CACHE_CLEANUP] Finished. Deleted ${deletedCount} files.`);
-    } else {
-        console.log('[CACHE_CLEANUP] Finished. No old files found to delete.');
-    }
   });
 }
 setInterval(cleanupCache, CLEANUP_INTERVAL_MINUTES * 60 * 1000);
@@ -128,13 +144,13 @@ function convertDriveUrl(url) {
 convertBtn.addEventListener('click', () => {
   let url = input.value.trim();
   if (!url) return showToast('Please enter a URL!');
+  // The backend now handles this automatically, but doing it on the frontend provides instant user feedback.
   const driveConverted = convertDriveUrl(url);
   if (driveConverted) {
-    showToast('Detected Google Drive URL – converted automatically!');
-    url = driveConverted;
+    showToast('Detected Google Drive URL – proxy will handle it!');
   }
   const filename = filenameInput.value.trim();
-  let corsUrl = BASE_PROXY + '/proxy?url=' + encodeURIComponent(url);
+  let corsUrl = BASE_PROXY + '/proxy?url=' + encodeURIComponent(input.value.trim()); // Use original URL
   if (filename) corsUrl += '&filename=' + encodeURIComponent(filename);
   output.value = corsUrl;
   showToast('CORS-Free URL generated!');
@@ -161,27 +177,29 @@ copyOutputBtn.addEventListener('click', () => {
 </html>`);
 });
 
-// -----------------------------
-// PROXY ENDPOINT WITH CACHING
-// -----------------------------
+// ----------------------------------------------------
+// PROXY ENDPOINT WITH CACHING & GOOGLE DRIVE HANDLING
+// ----------------------------------------------------
 app.get('/proxy', async (req, res) => {
   try {
-    const fileUrl = req.query.url;
+    const originalUrl = req.query.url;
     const filenameParam = req.query.filename;
-    if (!fileUrl) return res.status(400).send('Missing url parameter');
+    if (!originalUrl) return res.status(400).send('Missing url parameter');
 
-    const cacheKeySource = `${fileUrl}|${filenameParam || ''}`;
+    // Always use the original URL for a consistent cache key
+    const cacheKeySource = `${originalUrl}|${filenameParam || ''}`;
     const cacheKey = crypto.createHash('md5').update(cacheKeySource).digest('hex');
     const cacheFilePath = path.join(CACHE_DIR, cacheKey);
     const metadataPath = cacheFilePath + '.meta.json';
 
     res.setHeader('Cache-Control', `public, max-age=${CACHE_DURATION_SECONDS}, immutable`);
 
+    // --- CACHE HIT ---
     if (fs.existsSync(cacheFilePath) && fs.existsSync(metadataPath)) {
       const stats = fs.statSync(cacheFilePath);
       const ageInSeconds = (Date.now() - stats.mtime.getTime()) / 1000;
       if (ageInSeconds < CACHE_DURATION_SECONDS) {
-        console.log(`[CACHE HIT] Serving ${fileUrl}`);
+        console.log(`[CACHE HIT] Serving ${originalUrl}`);
         const metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
         res.setHeader('X-Cache-Status', 'HIT');
         res.setHeader('Content-Type', metadata.contentType);
@@ -191,57 +209,134 @@ app.get('/proxy', async (req, res) => {
       }
     }
 
-    console.log(`[CACHE MISS] Fetching ${fileUrl}`);
+    // --- CACHE MISS ---
+    console.log(`[CACHE MISS] Processing ${originalUrl}`);
     res.setHeader('X-Cache-Status', 'MISS');
-    const upstreamResponse = await fetch(fileUrl);
-    if (!upstreamResponse.ok) {
-      return res.status(502).send(`Failed to fetch: ${upstreamResponse.statusText}`);
+
+    let upstreamResponse;
+    let targetUrl = originalUrl;
+
+    // --- Google Drive URL Transformation ---
+    const driveRegex = /https:\/\/drive\.google\.com\/(?:file\/d\/|open\?id=)([a-zA-Z0-9_-]+)/;
+    const driveMatch = targetUrl.match(driveRegex);
+
+    if (driveMatch) {
+      const fileId = driveMatch[1];
+      const initialDriveUrl = `https://drive.google.com/uc?export=download&id=${fileId}`;
+      console.log(`[GDRIVE] Detected Google Drive URL. Attempting fetch from: ${initialDriveUrl}`);
+
+      const firstResponse = await fetch(initialDriveUrl, { redirect: 'follow' });
+      
+      // Check if it's the confirmation page (for large files)
+      const contentTypeHeader = firstResponse.headers.get('content-type') || '';
+      if (contentTypeHeader.includes('text/html')) {
+        console.log('[GDRIVE] Confirmation page detected. Attempting second fetch.');
+        const body = await firstResponse.text();
+        const cookies = firstResponse.headers.get('set-cookie');
+        
+        const confirmLinkRegex = /<form id="download-form" action="([^"]+)"/;
+        const confirmMatch = body.match(confirmLinkRegex);
+
+        if (confirmMatch && confirmMatch[1] && cookies) {
+          const confirmUrl = confirmMatch[1].replace(/&amp;/g, '&');
+          const finalUrl = `https://drive.google.com${confirmUrl}`;
+          console.log(`[GDRIVE] Found confirmation link. Fetching: ${finalUrl}`);
+          
+          upstreamResponse = await fetch(finalUrl, { headers: { 'Cookie': cookies } });
+        } else {
+          return res.status(404).send('Google Drive file not found or confirmation failed.');
+        }
+      } else {
+        // It was a small file, direct download worked
+        upstreamResponse = firstResponse;
+      }
+    } else {
+      // Not a Google Drive URL, fetch directly
+      upstreamResponse = await fetch(targetUrl);
     }
 
+    if (!upstreamResponse.ok) {
+      return res.status(upstreamResponse.status).send(`Failed to fetch: ${upstreamResponse.statusText}`);
+    }
+
+    // --- Process Response and Set Headers ---
     const contentType = upstreamResponse.headers.get('content-type') || 'application/octet-stream';
+    
+    // Safety check: Don't serve and cache HTML error pages from the upstream source
+    if (contentType.includes('text/html')) {
+      console.error(`[ERROR] Upstream source returned an HTML page. Aborting. URL: ${targetUrl}`);
+      return res.status(502).send('Upstream source returned an HTML page instead of a file, which may be an error or login page.');
+    }
+
     const disposition = upstreamResponse.headers.get('content-disposition') || '';
-    const cdMatch = disposition.match(/filename\\*?=(?:UTF-8''|)["']?([^"';]+)["']?/i);
-    const headerFilename = cdMatch ? decodeURIComponent(cdMatch[1]) : null;
-    const urlFilename = path.basename(new URL(fileUrl).pathname);
-    const filename = filenameParam || headerFilename || (urlFilename !== '/' ? urlFilename : 'file');
-    const safeName = encodeURIComponent(filename).replace(/['()]/g, escape);
-    const finalDisposition = `attachment; filename="${filename}"; filename*=UTF-8''${safeName}`;
+    const cdMatch = disposition.match(/filename\*?=(?:UTF-8'')?([^;]+)/i);
+    let headerFilename = null;
+    if (cdMatch && cdMatch[1]) {
+        try {
+            headerFilename = decodeURIComponent(cdMatch[1].replace(/["']/g, ''));
+        } catch (e) {
+            headerFilename = cdMatch[1].replace(/["']/g, '');
+        }
+    }
+
+    const urlFilename = path.basename(new URL(originalUrl).pathname);
+    const filename = filenameParam || headerFilename || (urlFilename !== '/' && urlFilename !== '' ? urlFilename : 'downloaded-file');
+
+    const safeName = encodeURIComponent(filename).replace(/'/g, '%27'); // More robust encoding for filenames
+    const finalDisposition = `attachment; filename="${filename.replace(/"/g, '\\"')}"; filename*=UTF-8''${safeName}`;
+    
     res.setHeader('Content-Type', contentType);
     res.setHeader('Content-Disposition', finalDisposition);
     
+    // --- Stream to Client and Cache Simultaneously ---
+    // This is the correct way to handle piping a stream to multiple destinations.
+    const passthrough = new PassThrough();
+    upstreamResponse.body.pipe(passthrough); // Data from fetch goes into passthrough
+    
     const fileStream = fs.createWriteStream(cacheFilePath);
-    upstreamResponse.body.pipe(fileStream);
-    const metadata = { contentType, contentDisposition: finalDisposition };
-    fs.writeFileSync(metadataPath, JSON.stringify(metadata));
-    upstreamResponse.body.pipe(res);
+    passthrough.pipe(fileStream); // Data from passthrough goes to the cache file
+    passthrough.pipe(res);       // Data from passthrough also goes to the client
+
+    fileStream.on('finish', () => {
+      const metadata = { contentType, contentDisposition: finalDisposition };
+      fs.writeFileSync(metadataPath, JSON.stringify(metadata), 'utf8');
+      console.log(`[CACHE SET] Cached response for ${originalUrl}`);
+    });
+    fileStream.on('error', (err) => {
+        console.error('[CACHE ERROR] Could not write to cache file:', err);
+    });
 
   } catch (err) {
-    console.error('Proxy error:', err);
+    console.error('Proxy error:', err.message);
     res.status(500).send('Error: ' + err.message);
   }
 });
+
 
 // -----------------------------
 // START SERVER + KEEP ALIVE
 // -----------------------------
 app.listen(PORT, () => {
   const localUrl = `http://localhost:${PORT}`;
-  const publicUrl = 'https://corsproxy-bppd.onrender.com'; // Hardcoded public URL
+  // You might want to make this dynamic if deploying elsewhere
+  const publicUrl = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
 
   console.log(`✅ Server listening on ${localUrl}`);
-  console.log(`✅ Public URL for keep-alive: ${publicUrl}`);
-
-  // Keep Render's free tier awake by pinging the public URL
-  setInterval(() => {
-    console.log(`Pinging ${publicUrl} to keep alive...`);
-    fetch(publicUrl)
-      .then(res => {
-        if (res.ok) {
-          console.log('🔄 Keep-alive ping successful.');
-        } else {
-          console.log(`⚠️ Keep-alive ping failed with status: ${res.status}`);
-        }
-      })
-      .catch(err => console.log(`⚠️ Keep-alive ping failed: ${err.message}`));
-  }, 10 * 1000);
+  
+  // Only run keep-alive if on a platform that provides a public URL (like Render)
+  if (process.env.RENDER_EXTERNAL_URL) {
+      console.log(`✅ Public URL for keep-alive: ${publicUrl}`);
+      setInterval(() => {
+        console.log(`Pinging ${publicUrl} to keep alive...`);
+        fetch(publicUrl)
+          .then(res => {
+            if (res.ok) {
+              console.log('🔄 Keep-alive ping successful.');
+            } else {
+              console.log(`⚠️ Keep-alive ping failed with status: ${res.status}`);
+            }
+          })
+          .catch(err => console.log(`⚠️ Keep-alive ping failed: ${err.message}`));
+      }, 10 * 1000);
+  }
 });
